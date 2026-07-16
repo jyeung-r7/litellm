@@ -11,12 +11,14 @@ __all__ = ["ingest", "aingest", "query", "aquery"]
 
 import asyncio
 import contextvars
+from contextlib import contextmanager
 from functools import partial
 from typing import (
     TYPE_CHECKING,
     Any,
     Coroutine,
     Dict,
+    Iterator,
     List,
     Optional,
     Tuple,
@@ -190,6 +192,26 @@ async def aingest(
         )
 
 
+@contextmanager
+def _suppressed_sub_call_billing(suppressed: bool) -> Iterator[None]:
+    """
+    Suppress a sub-call's own billing event so the parent aquery event bills it.
+
+    Only suppress when the caller folds the sub-call's cost into the parent
+    event; otherwise the sub-call must keep billing itself or its spend is lost.
+    """
+    if not suppressed:
+        yield
+        return
+
+    previous = is_internal_call.get()
+    is_internal_call.set(True)
+    try:
+        yield
+    finally:
+        is_internal_call.set(previous)
+
+
 async def _execute_query_pipeline(
     model: str,
     messages: List[Any],
@@ -211,9 +233,9 @@ async def _execute_query_pipeline(
         raise ValueError("No query found in messages for RAG query")
 
     # 2. Search vector store
-    _prev_internal = is_internal_call.get()
-    is_internal_call.set(True)
-    try:
+    folds_sub_call_cost = not stream
+
+    with _suppressed_sub_call_billing(True):
         search_response = await litellm.vector_stores.asearch(
             vector_store_id=retrieval_config["vector_store_id"],
             query=query_text,
@@ -221,8 +243,6 @@ async def _execute_query_pipeline(
             custom_llm_provider=retrieval_config.get("custom_llm_provider", "openai"),
             **kwargs,
         )
-    finally:
-        is_internal_call.set(_prev_internal)
 
     search_provider = retrieval_config.get("custom_llm_provider", "openai")
     try:
@@ -244,20 +264,18 @@ async def _execute_query_pipeline(
     if rerank and rerank.get("enabled"):
         documents = RAGQuery.extract_documents_from_search(search_response)
         if documents:
-            is_internal_call.set(True)
-            try:
+            with _suppressed_sub_call_billing(folds_sub_call_cost):
                 rerank_response = await litellm.arerank(
                     model=rerank["model"],
                     query=query_text,
                     documents=documents,
                     top_n=rerank.get("top_n", 5),
                 )
-            finally:
-                is_internal_call.set(_prev_internal)
-            rerank_hidden_params = getattr(rerank_response, "_hidden_params", None)
-            if isinstance(rerank_hidden_params, dict):
-                rerank_response_cost: float | None = rerank_hidden_params.get("response_cost")
-                rerank_cost = rerank_response_cost or 0.0
+            if folds_sub_call_cost:
+                rerank_hidden_params = getattr(rerank_response, "_hidden_params", None)
+                if isinstance(rerank_hidden_params, dict):
+                    rerank_response_cost: float | None = rerank_hidden_params.get("response_cost")
+                    rerank_cost = rerank_response_cost or 0.0
             context_chunks = RAGQuery.get_top_chunks_from_rerank(search_response, rerank_response)
 
     # 4. Build context message and call completion
@@ -265,8 +283,7 @@ async def _execute_query_pipeline(
     modified_messages = messages[:-1] + [context_message] + [messages[-1]]
 
     # Use router if available to properly resolve virtual model names
-    is_internal_call.set(True)
-    try:
+    with _suppressed_sub_call_billing(True):
         if router is not None:
             response = await router.acompletion(
                 model=model,
@@ -281,8 +298,6 @@ async def _execute_query_pipeline(
                 stream=stream,
                 **kwargs,
             )
-    finally:
-        is_internal_call.set(_prev_internal)
 
     # 5. Attach search results to response
     if not stream and isinstance(response, ModelResponse):

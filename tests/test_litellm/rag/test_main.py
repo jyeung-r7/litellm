@@ -198,6 +198,41 @@ async def test_aquery_with_rerank_bills_once_and_folds_rerank_cost():
     assert standard_logging_object["response_cost"] == total_cost
 
 
+@pytest.mark.asyncio
+async def test_aquery_streaming_rerank_keeps_its_own_billing_event():
+    """
+    Sub-call cost is only folded into the parent event on the non-streaming
+    path (the streamed response's cost is computed from the assembled chunks,
+    so there is nothing to fold into). Rerank must therefore keep billing its
+    own event when streaming, otherwise suppressing it drops rerank spend for
+    any caller that passes stream=true.
+    """
+    from litellm.types.rerank import RerankResponse
+
+    rerank_seen = {}
+
+    async def fake_arerank(**kwargs):
+        rerank_seen["internal"] = is_internal_call.get()
+        rerank_result = RerankResponse(id="rr_1", results=[{"index": 0, "relevance_score": 0.9}], meta={})
+        rerank_result._hidden_params["response_cost"] = 0.001
+        return rerank_result
+
+    with patch("litellm.arerank", side_effect=fake_arerank):
+        response = await litellm.aquery(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": "hello"}],
+            retrieval_config={"vector_store_id": "vs_test_123", "custom_llm_provider": "openai"},
+            rerank={"enabled": True, "model": "cohere/rerank-english-v3.0", "top_n": 1},
+            mock_response="hi there",
+            stream=True,
+        )
+        async for _ in response:
+            pass
+
+    assert rerank_seen["internal"] is False
+    assert is_internal_call.get() is False
+
+
 def test_rag_call_types_are_registered():
     """
     query/aquery/ingest/aingest are @client-decorated entry points, so their
