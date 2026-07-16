@@ -695,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn document_intelligence_response_omits_absent_azure_fields_as_null() {
+    fn document_intelligence_response_omits_absent_azure_fields() {
         let response = AZURE_DOCUMENT_INTELLIGENCE_OCR_CONFIG
             .transform_ocr_response(
                 "prebuilt-read",
@@ -713,8 +713,9 @@ mod tests {
         assert_eq!(response.key_value_pairs, None);
 
         let serialized = response.into_json();
-        assert!(serialized["content"].is_null());
-        assert!(serialized["tables"].is_null());
-        assert!(serialized["keyValuePairs"].is_null());
+        let object = serialized.as_object().expect("object");
+        assert!(!object.contains_key("content"));
+        assert!(!object.contains_key("tables"));
+        assert!(!object.contains_key("keyValuePairs"));
     }
 }

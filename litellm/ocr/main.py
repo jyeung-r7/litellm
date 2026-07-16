@@ -10,6 +10,7 @@ from io import IOBase
 from typing import Any, Coroutine, Union, cast
 
 import httpx
+from pydantic import ValidationError
 
 import litellm
 from litellm._logging import verbose_logger
@@ -19,10 +20,73 @@ from litellm.llms.base_llm.ocr.transformation import OCRResponse
 from litellm.ocr.rust_bridge import (
     RustAocr,
     RustOcr,
+    RustOcrError,
     load_rust_aocr,
     load_rust_ocr,
 )
 from litellm.utils import client, filter_out_litellm_params
+
+
+def _rust_ocr_error_to_public_exception(
+    err: RustOcrError, model: str, custom_llm_provider: str | None
+) -> Exception:
+    """Map a typed Rust OCR failure onto the public exception matching its status."""
+    provider = custom_llm_provider or "mistral"
+    status_code = err.status_code
+    message = err.message
+    if status_code is None:
+        return litellm.APIConnectionError(
+            message=message, llm_provider=provider, model=model
+        )
+    if status_code == 401:
+        return litellm.AuthenticationError(
+            message=message, llm_provider=provider, model=model
+        )
+    if status_code == 404:
+        return litellm.NotFoundError(
+            message=message, model=model, llm_provider=provider
+        )
+    if status_code == 408:
+        return litellm.Timeout(message=message, model=model, llm_provider=provider)
+    if 400 <= status_code < 500:
+        return litellm.BadRequestError(
+            message=message, model=model, llm_provider=provider
+        )
+    if status_code >= 500:
+        return litellm.InternalServerError(
+            message=message, model=model, llm_provider=provider
+        )
+    return litellm.APIError(
+        status_code=status_code, message=message, llm_provider=provider, model=model
+    )
+
+
+def _map_ocr_exception(
+    e: Exception,
+    model: str,
+    custom_llm_provider: str | None,
+    completion_kwargs: dict[str, object],
+    kwargs: dict[str, object],
+) -> Exception:
+    """Single host mapping for every OCR failure onto the public exception contract.
+
+    A plain ``ValueError`` is invalid client input, so it becomes a
+    ``BadRequestError``; a pydantic ``ValidationError`` is a malformed response
+    rather than client input, so it stays on the generic path.
+    """
+    if isinstance(e, RustOcrError):
+        return _rust_ocr_error_to_public_exception(e, model, custom_llm_provider)
+    if isinstance(e, ValueError) and not isinstance(e, ValidationError):
+        return litellm.BadRequestError(
+            message=str(e), model=model, llm_provider=custom_llm_provider or "mistral"
+        )
+    return litellm.exception_type(
+        model=model,
+        custom_llm_provider=custom_llm_provider,
+        original_exception=e,
+        completion_kwargs=completion_kwargs,
+        extra_kwargs=kwargs,
+    )
 
 
 def _timeout_to_seconds(
@@ -357,12 +421,12 @@ async def aocr(
             litellm_logging_obj=litellm_logging_obj,
         )
     except Exception as e:
-        raise litellm.exception_type(
+        raise _map_ocr_exception(
+            e,
             model=model,
             custom_llm_provider=custom_llm_provider,
-            original_exception=e,
             completion_kwargs=completion_kwargs,
-            extra_kwargs=kwargs,
+            kwargs=kwargs,
         )
 
 
@@ -621,10 +685,10 @@ def ocr(
             litellm_logging_obj=litellm_logging_obj,
         )
     except Exception as e:
-        raise litellm.exception_type(
+        raise _map_ocr_exception(
+            e,
             model=model,
             custom_llm_provider=custom_llm_provider,
-            original_exception=e,
             completion_kwargs=completion_kwargs,
-            extra_kwargs=kwargs,
+            kwargs=kwargs,
         )

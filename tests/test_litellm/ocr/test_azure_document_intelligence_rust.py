@@ -1,14 +1,5 @@
-"""Deterministic Azure Document Intelligence parity tests over the real Rust bridge.
-
-These exercise the user-facing ``litellm.ocr()`` path end to end against a local
-Azure-Document-Intelligence-compatible server, so they need the compiled native
-bridge. They are skipped when the extension is not built (e.g. in the pure-Python
-CI job), matching the convention in ``test_rust_bridge.py``.
-"""
-
 from __future__ import annotations
 
-import importlib
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,11 +8,10 @@ import pytest
 
 import litellm
 from litellm.llms.base_llm.ocr.transformation import OCRResponse
-
-rust_bridge_loader = importlib.import_module("litellm.rust_bridge.loader")
+from litellm.rust_bridge.loader import native_bridge_available
 
 pytestmark = pytest.mark.skipif(
-    not rust_bridge_loader.native_bridge_available(),
+    not native_bridge_available(),
     reason="native Rust OCR bridge is not built",
 )
 

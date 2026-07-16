@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use litellm_ai_gateway::io::ocr::{ocr as run_ocr, OcrRequest};
 use litellm_core::error::CoreError;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use serde_json::{Map, Value};
@@ -29,32 +29,22 @@ fn json_to_py(py: Python<'_>, value: Value) -> PyResult<Py<PyAny>> {
     Ok(json.call_method1("loads", (encoded,))?.unbind())
 }
 
-fn core_error_status(err: &CoreError) -> Option<u16> {
-    match err {
-        CoreError::Http { status, .. } => Some(*status),
-        CoreError::InvalidProvider(_)
-        | CoreError::InvalidRequest(_)
-        | CoreError::InvalidType { .. }
-        | CoreError::MissingField(_) => Some(400),
-        CoreError::Auth(_) => Some(401),
-        CoreError::Timeout(_) => Some(408),
-        CoreError::Network(_) | CoreError::InvalidResponse(_) | CoreError::Routing(_) => None,
-    }
+fn core_error_to_pyerr(py: Python<'_>, err: CoreError) -> PyErr {
+    let status_code = err.public_status_code();
+    let message = err.to_string();
+    build_rust_ocr_error(py, &message, status_code).unwrap_or_else(|import_err| import_err)
 }
 
-fn core_error_to_pyerr(err: CoreError) -> PyErr {
-    let status = core_error_status(&err);
-    let message = err.to_string();
-    Python::with_gil(|py| {
-        let pyerr = match status {
-            Some(code) if (400..500).contains(&code) => PyValueError::new_err(message),
-            _ => PyRuntimeError::new_err(message),
-        };
-        if let Some(code) = status {
-            let _ = pyerr.value(py).setattr("status_code", code);
-        }
-        pyerr
-    })
+fn build_rust_ocr_error(
+    py: Python<'_>,
+    message: &str,
+    status_code: Option<u16>,
+) -> PyResult<PyErr> {
+    let exc_type = py
+        .import("litellm.ocr.rust_bridge")?
+        .getattr("RustOcrError")?;
+    let instance = exc_type.call1((message, status_code))?;
+    Ok(PyErr::from_value(instance))
 }
 
 fn optional_object_to_map(
@@ -137,7 +127,7 @@ fn ocr(
 
     match result {
         Ok(value) => json_to_py(py, value),
-        Err(err) => Err(core_error_to_pyerr(err)),
+        Err(err) => Err(core_error_to_pyerr(py, err)),
     }
 }
 
@@ -176,7 +166,7 @@ fn aocr(
             timeout,
         })
         .await
-        .map_err(core_error_to_pyerr)?;
+        .map_err(|err| Python::with_gil(|py| core_error_to_pyerr(py, err)))?;
 
         Python::with_gil(|py| json_to_py(py, value))
     })

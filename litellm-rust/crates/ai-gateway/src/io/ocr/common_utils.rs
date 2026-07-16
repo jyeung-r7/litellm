@@ -29,6 +29,14 @@ const AZURE_OPERATION_POLLING_TIMEOUT_ENV: &str = "AZURE_OPERATION_POLLING_TIMEO
 const DEFAULT_MAX_IMAGE_URL_DOWNLOAD_SIZE_MB: f64 = 50.0;
 const MAX_SAFE_FETCH_REDIRECTS: usize = 10;
 
+pub(super) fn classify_reqwest_error(err: reqwest::Error) -> CoreError {
+    if err.is_timeout() {
+        CoreError::Timeout
+    } else {
+        CoreError::Network(err.to_string())
+    }
+}
+
 pub(super) fn truncate_error_body(body: &str) -> String {
     if body.chars().count() <= ERROR_BODY_MAX_CHARS {
         return body.to_string();
@@ -228,7 +236,7 @@ async fn safe_get_document_url(url: &str) -> CoreResult<(Url, reqwest::Response)
             .get(current_url.clone())
             .send()
             .await
-            .map_err(|err| CoreError::Network(err.to_string()))?;
+            .map_err(classify_reqwest_error)?;
         if !response.status().is_redirection() {
             return Ok((current_url, response));
         }
@@ -269,11 +277,7 @@ async fn read_response_with_limit(
 
     let mut bytes = Vec::new();
     let mut bytes_downloaded: u64 = 0;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| CoreError::Network(err.to_string()))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(classify_reqwest_error)? {
         bytes_downloaded += chunk.len() as u64;
         enforce_download_size(bytes_downloaded, max_bytes, url)?;
         bytes.extend_from_slice(&chunk);
@@ -389,12 +393,9 @@ async fn upload_reducto_bytes(
     let response = request_builder
         .send()
         .await
-        .map_err(|err| CoreError::Network(err.to_string()))?;
+        .map_err(classify_reqwest_error)?;
     let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(|err| CoreError::Network(err.to_string()))?;
+    let text = response.text().await.map_err(classify_reqwest_error)?;
     if !status.is_success() {
         return Err(CoreError::Http {
             status: status.as_u16(),
@@ -506,22 +507,15 @@ fn parse_azure_operation_polling_timeout(raw: Option<String>) -> Duration {
     Duration::from_secs(secs)
 }
 
-fn azure_operation_polling_timeout() -> Duration {
+pub(super) fn azure_operation_polling_timeout() -> Duration {
     parse_azure_operation_polling_timeout(std::env::var(AZURE_OPERATION_POLLING_TIMEOUT_ENV).ok())
-}
-
-fn polling_timed_out(timeout: Duration) -> CoreError {
-    CoreError::Timeout(format!(
-        "Azure Document Intelligence operation polling timed out after {} seconds",
-        timeout.as_secs()
-    ))
 }
 
 pub(super) async fn poll_document_intelligence(
     operation_url: &str,
     original_url: &str,
     headers: &[(String, String)],
-    per_request_timeout: Option<Duration>,
+    deadline: Duration,
 ) -> CoreResult<Value> {
     if !same_origin(operation_url, original_url) {
         return Err(CoreError::InvalidRequest(
@@ -530,31 +524,25 @@ pub(super) async fn poll_document_intelligence(
     }
 
     let start = Instant::now();
-    let timeout = azure_operation_polling_timeout();
     loop {
-        if start.elapsed() >= timeout {
-            return Err(polling_timed_out(timeout));
+        let remaining = deadline.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            return Err(CoreError::Timeout);
         }
 
-        let mut request_builder = http_client().get(operation_url);
+        let mut request_builder = http_client().get(operation_url).timeout(remaining);
         for (key, value) in headers {
             if key.eq_ignore_ascii_case("ocp-apim-subscription-key") {
                 request_builder = request_builder.header(key, value);
             }
         }
-        if let Some(duration) = per_request_timeout {
-            request_builder = request_builder.timeout(duration);
-        }
         let response = request_builder
             .send()
             .await
-            .map_err(|err| CoreError::Network(err.to_string()))?;
+            .map_err(classify_reqwest_error)?;
         let retry_after = retry_after_secs(&response);
         let status = response.status();
-        let text = response
-            .text()
-            .await
-            .map_err(|err| CoreError::Network(err.to_string()))?;
+        let text = response.text().await.map_err(classify_reqwest_error)?;
         if !status.is_success() {
             return Err(CoreError::Http {
                 status: status.as_u16(),
@@ -567,9 +555,9 @@ pub(super) async fn poll_document_intelligence(
         if operation_status(&response_json)? == "succeeded" {
             return Ok(response_json);
         }
-        let remaining = timeout.saturating_sub(start.elapsed());
+        let remaining = deadline.saturating_sub(start.elapsed());
         if remaining.is_zero() {
-            return Err(polling_timed_out(timeout));
+            return Err(CoreError::Timeout);
         }
         tokio::time::sleep(remaining.min(Duration::from_secs(retry_after))).await;
     }
@@ -666,7 +654,7 @@ mod tests {
                 "Ocp-Apim-Subscription-Key".to_string(),
                 "secret".to_string(),
             )],
-            None,
+            Duration::from_secs(5),
         )
         .await
         .unwrap_err();
