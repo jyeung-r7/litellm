@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pypdf
 import pytest
 import yaml
 
@@ -89,11 +90,17 @@ class OcrGateway:
         }
 
     def ocr(
-        self, model: str, document: dict[str, str], pages: object | None = None
+        self,
+        model: str,
+        document: dict[str, str],
+        pages: list[int] | str | None = None,
+        features: list[str] | None = None,
     ) -> httpx.Response:
         body: dict[str, object] = {"model": model, "document": document}
         if pages is not None:
             body = {**body, "pages": pages}
+        if features is not None:
+            body = {**body, "features": features}
         with httpx.Client(
             timeout=float(os.getenv("E2E_REQUEST_TIMEOUT", "120"))
         ) as client:
@@ -134,9 +141,7 @@ def _assert_ocr_response_shape(response_json: dict[str, Any]) -> None:
 
 
 def _three_page_pdf_data_uri() -> str:
-    pypdf = pytest.importorskip("pypdf")
-    if not ONE_PAGE_FIXTURE.exists():
-        pytest.skip(f"missing one-page fixture at {ONE_PAGE_FIXTURE}")
+    assert ONE_PAGE_FIXTURE.exists(), f"missing one-page fixture at {ONE_PAGE_FIXTURE}"
     reader = pypdf.PdfReader(str(ONE_PAGE_FIXTURE))
     writer = pypdf.PdfWriter()
     for _ in range(3):
@@ -167,8 +172,8 @@ class TestAzureDocumentIntelligencePagesParity:
             AZURE_DI_MODEL, three_page_document, pages=[2, 0, 2]
         )
         assert response.status_code == 200, response.text
-        pages = response.json()["pages"]
-        assert len(pages) == 2
+        indices = [page["index"] for page in response.json()["pages"]]
+        assert indices == [0, 2]
 
     def test_single_zero_based_page(
         self, resources: OcrResources, three_page_document: dict[str, str]
@@ -176,7 +181,8 @@ class TestAzureDocumentIntelligencePagesParity:
         _require_azure_di(resources)
         response = resources.gateway.ocr(AZURE_DI_MODEL, three_page_document, pages=[0])
         assert response.status_code == 200, response.text
-        assert len(response.json()["pages"]) == 1
+        indices = [page["index"] for page in response.json()["pages"]]
+        assert indices == [0]
 
     def test_out_of_range_page_returns_provider_bad_request(
         self, resources: OcrResources, three_page_document: dict[str, str]
@@ -191,16 +197,16 @@ class TestAzureDocumentIntelligencePagesParity:
         self, resources: OcrResources, three_page_document: dict[str, str]
     ) -> None:
         _require_azure_di(resources)
-        response = resources.gateway.ocr(AZURE_DI_MODEL, three_page_document)
+        response = resources.gateway.ocr(
+            AZURE_DI_MODEL, three_page_document, features=["keyValuePairs"]
+        )
         assert response.status_code == 200, response.text
         body = response.json()
         _assert_ocr_response_shape(body)
         assert len(body["pages"]) == 3
         assert isinstance(body["content"], str) and body["content"]
-        if "tables" in body:
-            assert isinstance(body["tables"], list)
-        if "keyValuePairs" in body:
-            assert isinstance(body["keyValuePairs"], list)
+        assert isinstance(body["tables"], list)
+        assert isinstance(body["keyValuePairs"], list)
 
 
 class TestRustOcrGateway:

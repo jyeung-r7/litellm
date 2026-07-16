@@ -21,28 +21,27 @@ pub struct OcrResponseData {
 
 impl OcrResponseData {
     pub fn into_json(self) -> Value {
-        let mut map = serde_json::Map::new();
-        map.insert("pages".to_string(), Value::Array(self.pages));
-        map.insert("model".to_string(), Value::String(self.model));
-        map.insert(
-            "document_annotation".to_string(),
-            self.document_annotation.unwrap_or(Value::Null),
-        );
-        map.insert(
-            "usage_info".to_string(),
-            self.usage_info.unwrap_or(Value::Null),
-        );
-        map.insert("object".to_string(), Value::String(self.object));
-        if let Some(content) = self.content {
-            map.insert("content".to_string(), content);
-        }
-        if let Some(tables) = self.tables {
-            map.insert("tables".to_string(), tables);
-        }
-        if let Some(key_value_pairs) = self.key_value_pairs {
-            map.insert("keyValuePairs".to_string(), key_value_pairs);
-        }
-        Value::Object(map)
+        let base = [
+            ("pages".to_string(), Value::Array(self.pages)),
+            ("model".to_string(), Value::String(self.model)),
+            (
+                "document_annotation".to_string(),
+                self.document_annotation.unwrap_or(Value::Null),
+            ),
+            (
+                "usage_info".to_string(),
+                self.usage_info.unwrap_or(Value::Null),
+            ),
+            ("object".to_string(), Value::String(self.object)),
+        ];
+        let extras = [
+            ("content", self.content),
+            ("tables", self.tables),
+            ("keyValuePairs", self.key_value_pairs),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| (key.to_string(), value)));
+        Value::Object(base.into_iter().chain(extras).collect())
     }
 }
 
