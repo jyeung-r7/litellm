@@ -29,15 +29,6 @@ _ENV_REFERENCE_PREFIX = "os.environ/"
 
 
 def _resolve_env_reference(value: str | None) -> str | None:
-    """Resolve an ``os.environ/NAME`` credential/api-base reference to its secret value.
-
-    Deployments created through ``/model/new`` persist ``litellm_params`` verbatim,
-    so their ``api_key``/``api_base`` can reach the OCR host layer as the literal
-    ``os.environ/NAME`` string. The Rust bridge forwards whatever it receives
-    upstream, so the reference must be resolved here, at the host edge, before Rust
-    authorization; otherwise the literal is sent as the credential (upstream 401) or
-    logged. Explicit values and missing env vars are returned unchanged.
-    """
     if value is None or not value.startswith(_ENV_REFERENCE_PREFIX):
         return value
     return get_secret_str(value)
@@ -99,7 +90,6 @@ def _resolve_ocr_call_context(
             "Must be 'document_url', 'image_url', or 'file'"
         )
 
-    api_key = _resolve_env_reference(api_key)
     api_base = _resolve_env_reference(api_base)
 
     (
@@ -118,6 +108,9 @@ def _resolve_ocr_call_context(
         api_key = dynamic_api_key
     if dynamic_api_base:
         api_base = dynamic_api_base
+
+    api_key = _resolve_env_reference(api_key)
+    api_base = _resolve_env_reference(api_base)
 
     verbose_logger.debug(f"OCR call - model: {model}, provider: {custom_llm_provider}")
 

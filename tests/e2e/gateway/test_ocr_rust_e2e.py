@@ -134,6 +134,15 @@ class OcrGateway:
             f"{model_name} did not appear on /model/info within {attempts}s"
         )
 
+    def wait_for_model_absent(self, model_name: str, attempts: int = 20) -> None:
+        for _ in range(attempts):
+            if model_name not in self.model_names():
+                return
+            time.sleep(1)
+        raise AssertionError(
+            f"{model_name} still present on /model/info after {attempts}s"
+        )
+
 
 @dataclass(frozen=True)
 class OcrResources:
@@ -191,14 +200,6 @@ class TestRustOcrGateway:
 
 
 class TestRustOcrDynamicDeployment:
-    """Regression for the DB-created deployment credential path (report row A4).
-
-    A deployment created through `/model/new` persists `litellm_params` verbatim,
-    so its `api_key` reaches the Rust OCR host as the literal `os.environ/NAME`.
-    The host must resolve it before Rust authorization; otherwise the literal is
-    sent upstream as the credential and OCR fails with a 401/500.
-    """
-
     def test_os_environ_api_key_deployment_lifecycle(
         self, resources: OcrResources
     ) -> None:
@@ -233,4 +234,4 @@ class TestRustOcrDynamicDeployment:
             delete = gateway.delete_model(model_id)
             assert delete.status_code == 200, delete.text
 
-        assert model_name not in gateway.model_names()
+        gateway.wait_for_model_absent(model_name)
