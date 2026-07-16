@@ -8,6 +8,8 @@ litellm --config tests/e2e/gateway/litellm-config.yml --port 4000
 
 from __future__ import annotations
 
+import base64
+import io
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +18,10 @@ from typing import Any
 import httpx
 import pytest
 import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+ONE_PAGE_FIXTURE = REPO_ROOT / "tests" / "llm_translation" / "fixtures" / "dummy.pdf"
+AZURE_DI_MODEL = "rust-ocr-azure-document-intelligence"
 
 TEST_PDF_URL = (
     "https://cdn.jsdelivr.net/gh/BerriAI/litellm"
@@ -82,14 +88,19 @@ class OcrGateway:
             if "model_name" in model
         }
 
-    def ocr(self, model: str, document: dict[str, str]) -> httpx.Response:
+    def ocr(
+        self, model: str, document: dict[str, str], pages: object | None = None
+    ) -> httpx.Response:
+        body: dict[str, object] = {"model": model, "document": document}
+        if pages is not None:
+            body = {**body, "pages": pages}
         with httpx.Client(
             timeout=float(os.getenv("E2E_REQUEST_TIMEOUT", "120"))
         ) as client:
             return client.post(
                 f"{self.base_url.rstrip('/')}/v1/ocr",
                 headers={"Authorization": f"Bearer {self.master_key}"},
-                json={"model": model, "document": document},
+                json=body,
             )
 
 
@@ -120,6 +131,76 @@ def _assert_ocr_response_shape(response_json: dict[str, Any]) -> None:
     assert len(response_json["pages"]) > 0
     assert "index" in response_json["pages"][0]
     assert "markdown" in response_json["pages"][0]
+
+
+def _three_page_pdf_data_uri() -> str:
+    pypdf = pytest.importorskip("pypdf")
+    if not ONE_PAGE_FIXTURE.exists():
+        pytest.skip(f"missing one-page fixture at {ONE_PAGE_FIXTURE}")
+    reader = pypdf.PdfReader(str(ONE_PAGE_FIXTURE))
+    writer = pypdf.PdfWriter()
+    for _ in range(3):
+        writer.add_page(reader.pages[0])
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:application/pdf;base64,{encoded}"
+
+
+@pytest.fixture
+def three_page_document() -> dict[str, str]:
+    return {"type": "document_url", "document_url": _three_page_pdf_data_uri()}
+
+
+def _require_azure_di(resources: OcrResources) -> None:
+    if AZURE_DI_MODEL not in resources.gateway.model_names():
+        pytest.skip(f"{AZURE_DI_MODEL} is not loaded on the gateway")
+
+
+@pytest.mark.e2e
+class TestAzureDocumentIntelligencePagesParity:
+    def test_zero_based_pages_are_deduped_and_normalized(
+        self, resources: OcrResources, three_page_document: dict[str, str]
+    ) -> None:
+        _require_azure_di(resources)
+        response = resources.gateway.ocr(
+            AZURE_DI_MODEL, three_page_document, pages=[2, 0, 2]
+        )
+        assert response.status_code == 200, response.text
+        pages = response.json()["pages"]
+        assert len(pages) == 2
+
+    def test_single_zero_based_page(
+        self, resources: OcrResources, three_page_document: dict[str, str]
+    ) -> None:
+        _require_azure_di(resources)
+        response = resources.gateway.ocr(AZURE_DI_MODEL, three_page_document, pages=[0])
+        assert response.status_code == 200, response.text
+        assert len(response.json()["pages"]) == 1
+
+    def test_out_of_range_page_returns_provider_bad_request(
+        self, resources: OcrResources, three_page_document: dict[str, str]
+    ) -> None:
+        _require_azure_di(resources)
+        response = resources.gateway.ocr(
+            AZURE_DI_MODEL, three_page_document, pages=[99]
+        )
+        assert response.status_code == 400, response.text
+
+    def test_full_document_preserves_content_and_extra_fields(
+        self, resources: OcrResources, three_page_document: dict[str, str]
+    ) -> None:
+        _require_azure_di(resources)
+        response = resources.gateway.ocr(AZURE_DI_MODEL, three_page_document)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        _assert_ocr_response_shape(body)
+        assert len(body["pages"]) == 3
+        assert isinstance(body["content"], str) and body["content"]
+        if "tables" in body:
+            assert isinstance(body["tables"], list)
+        if "keyValuePairs" in body:
+            assert isinstance(body["keyValuePairs"], list)
 
 
 class TestRustOcrGateway:
