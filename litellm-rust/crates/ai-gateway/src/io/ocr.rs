@@ -184,6 +184,290 @@ mod tests {
         String::from_utf8(request).expect("request is utf8")
     }
 
+    async fn serve_http(
+        listener: &TcpListener,
+        status_line: &str,
+        extra_headers: &str,
+        body: &str,
+    ) -> String {
+        let (mut socket, _) = listener.accept().await.expect("accepts request");
+        let request = read_http_headers(&mut socket).await;
+        let response = format!(
+            "HTTP/1.1 {status_line}\r\n{extra_headers}content-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("writes response");
+        request
+    }
+
+    #[tokio::test]
+    async fn document_intelligence_normalizes_zero_based_pages_in_analyze_url() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener binds");
+        let addr = listener.local_addr().expect("listener has local addr");
+        let operation_url = format!("http://{addr}/operations/1");
+
+        let server = tokio::spawn(async move {
+            let analyze_request = serve_http(
+                &listener,
+                "202 Accepted",
+                &format!("operation-location: {operation_url}\r\n"),
+                "",
+            )
+            .await;
+            serve_http(
+                &listener,
+                "200 OK",
+                "content-type: application/json\r\n",
+                r#"{"status":"succeeded","analyzeResult":{"pages":[{"pageNumber":1,"lines":[{"content":"ok"}]}]}}"#,
+            )
+            .await;
+            analyze_request
+        });
+
+        let optional_params = json!({"pages": [2, 0, 2]})
+            .as_object()
+            .expect("object params")
+            .clone();
+
+        ocr(OcrRequest {
+            model: "prebuilt-layout",
+            document: json!({"type": "document_url", "document_url": "data:application/pdf;base64,YWJj"}),
+            api_key: Some("di-key"),
+            api_base: Some(&format!("http://{addr}")),
+            custom_llm_provider: "azure_ai/doc-intelligence",
+            extra_headers: None,
+            optional_params,
+            timeout: Some(Duration::from_secs(5)),
+        })
+        .await
+        .expect("document intelligence request succeeds");
+
+        let analyze_request = server.await.expect("server task completes");
+        let request_line = analyze_request.lines().next().unwrap_or_default();
+        assert!(
+            request_line.contains("pages=1,3") || request_line.contains("pages=1%2C3"),
+            "{request_line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn document_intelligence_preserves_content_tables_and_key_value_pairs() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener binds");
+        let addr = listener.local_addr().expect("listener has local addr");
+        let operation_url = format!("http://{addr}/operations/1");
+
+        tokio::spawn(async move {
+            serve_http(
+                &listener,
+                "202 Accepted",
+                &format!("operation-location: {operation_url}\r\n"),
+                "",
+            )
+            .await;
+            serve_http(
+                &listener,
+                "200 OK",
+                "content-type: application/json\r\n",
+                r#"{"status":"succeeded","analyzeResult":{"content":"full text","pages":[{"pageNumber":1,"lines":[{"content":"ok"}]}],"tables":[{"rowCount":1}],"keyValuePairs":[{"key":{"content":"k"},"value":{"content":"v"}}]}}"#,
+            )
+            .await;
+        });
+
+        let response = ocr(OcrRequest {
+            model: "prebuilt-layout",
+            document: json!({"type": "document_url", "document_url": "data:application/pdf;base64,YWJj"}),
+            api_key: Some("di-key"),
+            api_base: Some(&format!("http://{addr}")),
+            custom_llm_provider: "azure_ai/doc-intelligence",
+            extra_headers: None,
+            optional_params: Map::new(),
+            timeout: Some(Duration::from_secs(5)),
+        })
+        .await
+        .expect("document intelligence request succeeds");
+
+        assert_eq!(response["content"], "full text");
+        assert_eq!(response["tables"][0]["rowCount"], 1);
+        assert_eq!(response["keyValuePairs"][0]["value"]["content"], "v");
+    }
+
+    #[tokio::test]
+    async fn document_intelligence_polls_until_succeeded() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener binds");
+        let addr = listener.local_addr().expect("listener has local addr");
+        let operation_url = format!("http://{addr}/operations/1");
+
+        tokio::spawn(async move {
+            serve_http(
+                &listener,
+                "202 Accepted",
+                &format!("operation-location: {operation_url}\r\n"),
+                "",
+            )
+            .await;
+            serve_http(
+                &listener,
+                "200 OK",
+                "content-type: application/json\r\nretry-after: 0\r\n",
+                r#"{"status":"running"}"#,
+            )
+            .await;
+            serve_http(
+                &listener,
+                "200 OK",
+                "content-type: application/json\r\n",
+                r#"{"status":"succeeded","analyzeResult":{"pages":[{"pageNumber":1,"lines":[{"content":"done"}]}]}}"#,
+            )
+            .await;
+        });
+
+        let response = ocr(OcrRequest {
+            model: "prebuilt-read",
+            document: json!({"type": "document_url", "document_url": "data:application/pdf;base64,YWJj"}),
+            api_key: Some("di-key"),
+            api_base: Some(&format!("http://{addr}")),
+            custom_llm_provider: "azure_ai/doc-intelligence",
+            extra_headers: None,
+            optional_params: Map::new(),
+            timeout: Some(Duration::from_secs(5)),
+        })
+        .await
+        .expect("delayed completion succeeds");
+
+        assert_eq!(response["pages"][0]["markdown"], "done");
+    }
+
+    #[tokio::test]
+    async fn document_intelligence_polling_times_out_when_never_succeeds() {
+        std::env::set_var("AZURE_OPERATION_POLLING_TIMEOUT", "1");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener binds");
+        let addr = listener.local_addr().expect("listener has local addr");
+        let operation_url = format!("http://{addr}/operations/1");
+
+        let server = tokio::spawn(async move {
+            serve_http(
+                &listener,
+                "202 Accepted",
+                &format!("operation-location: {operation_url}\r\n"),
+                "",
+            )
+            .await;
+            loop {
+                serve_http(
+                    &listener,
+                    "200 OK",
+                    "content-type: application/json\r\nretry-after: 0\r\n",
+                    r#"{"status":"running"}"#,
+                )
+                .await;
+            }
+        });
+
+        let error = ocr(OcrRequest {
+            model: "prebuilt-read",
+            document: json!({"type": "document_url", "document_url": "data:application/pdf;base64,YWJj"}),
+            api_key: Some("di-key"),
+            api_base: Some(&format!("http://{addr}")),
+            custom_llm_provider: "azure_ai/doc-intelligence",
+            extra_headers: None,
+            optional_params: Map::new(),
+            timeout: Some(Duration::from_secs(5)),
+        })
+        .await
+        .expect_err("endless polling times out");
+
+        server.abort();
+        std::env::remove_var("AZURE_OPERATION_POLLING_TIMEOUT");
+        assert!(
+            matches!(&error, CoreError::Timeout(message) if message.contains("timed out")),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn document_intelligence_rejects_foreign_origin_operation_location() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener binds");
+        let addr = listener.local_addr().expect("listener has local addr");
+
+        tokio::spawn(async move {
+            serve_http(
+                &listener,
+                "202 Accepted",
+                "operation-location: https://169.254.169.254/operations/1\r\n",
+                "",
+            )
+            .await;
+        });
+
+        let error = ocr(OcrRequest {
+            model: "prebuilt-read",
+            document: json!({"type": "document_url", "document_url": "data:application/pdf;base64,YWJj"}),
+            api_key: Some("di-key"),
+            api_base: Some(&format!("http://{addr}")),
+            custom_llm_provider: "azure_ai/doc-intelligence",
+            extra_headers: None,
+            optional_params: Map::new(),
+            timeout: Some(Duration::from_secs(5)),
+        })
+        .await
+        .expect_err("foreign-origin operation-location rejected");
+
+        assert!(
+            matches!(&error, CoreError::InvalidRequest(message) if message.contains("cross-origin")),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn document_intelligence_preserves_provider_error_status() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener binds");
+        let addr = listener.local_addr().expect("listener has local addr");
+
+        tokio::spawn(async move {
+            serve_http(
+                &listener,
+                "404 Not Found",
+                "content-type: application/json\r\n",
+                r#"{"error":{"code":"NotFound","message":"model not found"}}"#,
+            )
+            .await;
+        });
+
+        let error = ocr(OcrRequest {
+            model: "prebuilt-read",
+            document: json!({"type": "document_url", "document_url": "data:application/pdf;base64,YWJj"}),
+            api_key: Some("di-key"),
+            api_base: Some(&format!("http://{addr}")),
+            custom_llm_provider: "azure_ai/doc-intelligence",
+            extra_headers: None,
+            optional_params: Map::new(),
+            timeout: Some(Duration::from_secs(5)),
+        })
+        .await
+        .expect_err("provider 404 preserved");
+
+        assert!(
+            matches!(error, CoreError::Http { status: 404, .. }),
+            "{error:?}"
+        );
+    }
+
     #[test]
     fn truncate_error_body_passes_short_strings_through() {
         let body = "Unauthorized";

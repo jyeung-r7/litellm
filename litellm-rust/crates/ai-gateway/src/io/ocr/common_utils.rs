@@ -24,7 +24,8 @@ use litellm_core::providers::vertex_ai::ocr::transformation::{
 use super::http_client;
 
 const ERROR_BODY_MAX_CHARS: usize = 256;
-const AZURE_DOCUMENT_INTELLIGENCE_POLL_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_AZURE_OPERATION_POLLING_TIMEOUT_SECS: u64 = 120;
+const AZURE_OPERATION_POLLING_TIMEOUT_ENV: &str = "AZURE_OPERATION_POLLING_TIMEOUT";
 const DEFAULT_MAX_IMAGE_URL_DOWNLOAD_SIZE_MB: f64 = 50.0;
 const MAX_SAFE_FETCH_REDIRECTS: usize = 10;
 
@@ -497,28 +498,42 @@ fn operation_status(response_json: &Value) -> CoreResult<&str> {
     }
 }
 
+fn parse_azure_operation_polling_timeout(raw: Option<String>) -> Duration {
+    let secs = raw
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_AZURE_OPERATION_POLLING_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+fn azure_operation_polling_timeout() -> Duration {
+    parse_azure_operation_polling_timeout(std::env::var(AZURE_OPERATION_POLLING_TIMEOUT_ENV).ok())
+}
+
+fn polling_timed_out(timeout: Duration) -> CoreError {
+    CoreError::Timeout(format!(
+        "Azure Document Intelligence operation polling timed out after {} seconds",
+        timeout.as_secs()
+    ))
+}
+
 pub(super) async fn poll_document_intelligence(
     operation_url: &str,
     original_url: &str,
     headers: &[(String, String)],
-    timeout: Option<Duration>,
+    per_request_timeout: Option<Duration>,
 ) -> CoreResult<Value> {
     if !same_origin(operation_url, original_url) {
-        return Err(CoreError::InvalidResponse(
+        return Err(CoreError::InvalidRequest(
             "Azure Document Intelligence: rejected cross-origin polling URL".to_string(),
         ));
     }
 
     let start = Instant::now();
-    let timeout = timeout.unwrap_or(Duration::from_secs(
-        AZURE_DOCUMENT_INTELLIGENCE_POLL_TIMEOUT_SECS,
-    ));
+    let timeout = azure_operation_polling_timeout();
     loop {
-        if start.elapsed() > timeout {
-            return Err(CoreError::Network(format!(
-                "Azure Document Intelligence operation polling timed out after {} seconds",
-                timeout.as_secs()
-            )));
+        if start.elapsed() >= timeout {
+            return Err(polling_timed_out(timeout));
         }
 
         let mut request_builder = http_client().get(operation_url);
@@ -526,6 +541,9 @@ pub(super) async fn poll_document_intelligence(
             if key.eq_ignore_ascii_case("ocp-apim-subscription-key") {
                 request_builder = request_builder.header(key, value);
             }
+        }
+        if let Some(duration) = per_request_timeout {
+            request_builder = request_builder.timeout(duration);
         }
         let response = request_builder
             .send()
@@ -549,7 +567,11 @@ pub(super) async fn poll_document_intelligence(
         if operation_status(&response_json)? == "succeeded" {
             return Ok(response_json);
         }
-        tokio::time::sleep(Duration::from_secs(retry_after)).await;
+        let remaining = timeout.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            return Err(polling_timed_out(timeout));
+        }
+        tokio::time::sleep(remaining.min(Duration::from_secs(retry_after))).await;
     }
 }
 
@@ -592,6 +614,66 @@ mod tests {
             error,
             CoreError::InvalidRequest(message)
                 if message.contains("SSRF protection")
+        ));
+    }
+
+    #[test]
+    fn polling_timeout_uses_default_when_absent_or_invalid() {
+        assert_eq!(
+            parse_azure_operation_polling_timeout(None),
+            Duration::from_secs(DEFAULT_AZURE_OPERATION_POLLING_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            parse_azure_operation_polling_timeout(Some("0".to_string())),
+            Duration::from_secs(DEFAULT_AZURE_OPERATION_POLLING_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            parse_azure_operation_polling_timeout(Some("not-a-number".to_string())),
+            Duration::from_secs(DEFAULT_AZURE_OPERATION_POLLING_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn polling_timeout_reads_configured_override() {
+        assert_eq!(
+            parse_azure_operation_polling_timeout(Some("  45 ".to_string())),
+            Duration::from_secs(45)
+        );
+    }
+
+    #[test]
+    fn same_origin_matches_scheme_host_and_port() {
+        assert!(same_origin(
+            "https://acct.cognitiveservices.azure.com/documentintelligence/x?op=1",
+            "https://acct.cognitiveservices.azure.com/documentintelligence/y:analyze"
+        ));
+        assert!(!same_origin(
+            "https://evil.example.com/op",
+            "https://acct.cognitiveservices.azure.com/analyze"
+        ));
+        assert!(!same_origin(
+            "http://acct.cognitiveservices.azure.com/op",
+            "https://acct.cognitiveservices.azure.com/analyze"
+        ));
+    }
+
+    #[tokio::test]
+    async fn poll_rejects_foreign_origin_before_any_request() {
+        let error = poll_document_intelligence(
+            "https://169.254.169.254/operation/123",
+            "https://acct.cognitiveservices.azure.com/documentintelligence/x:analyze",
+            &[(
+                "Ocp-Apim-Subscription-Key".to_string(),
+                "secret".to_string(),
+            )],
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CoreError::InvalidRequest(message) if message.contains("cross-origin")
         ));
     }
 

@@ -337,6 +337,7 @@ impl OcrProviderConfig for VertexAiDeepSeekOcrConfig {
             document_annotation: object.get("document_annotation").cloned(),
             usage_info,
             object: "ocr".to_string(),
+            ..Default::default()
         })
     }
 

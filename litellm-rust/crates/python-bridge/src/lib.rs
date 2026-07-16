@@ -29,15 +29,32 @@ fn json_to_py(py: Python<'_>, value: Value) -> PyResult<Py<PyAny>> {
     Ok(json.call_method1("loads", (encoded,))?.unbind())
 }
 
-fn core_error_to_pyerr(err: CoreError) -> PyErr {
+fn core_error_status(err: &CoreError) -> Option<u16> {
     match err {
-        CoreError::Auth(message) => PyValueError::new_err(message),
+        CoreError::Http { status, .. } => Some(*status),
         CoreError::InvalidProvider(_)
         | CoreError::InvalidRequest(_)
         | CoreError::InvalidType { .. }
-        | CoreError::MissingField(_) => PyValueError::new_err(err.to_string()),
-        other => PyRuntimeError::new_err(other.to_string()),
+        | CoreError::MissingField(_) => Some(400),
+        CoreError::Auth(_) => Some(401),
+        CoreError::Timeout(_) => Some(408),
+        CoreError::Network(_) | CoreError::InvalidResponse(_) | CoreError::Routing(_) => None,
     }
+}
+
+fn core_error_to_pyerr(err: CoreError) -> PyErr {
+    let status = core_error_status(&err);
+    let message = err.to_string();
+    Python::with_gil(|py| {
+        let pyerr = match status {
+            Some(code) if (400..500).contains(&code) => PyValueError::new_err(message),
+            _ => PyRuntimeError::new_err(message),
+        };
+        if let Some(code) = status {
+            let _ = pyerr.value(py).setattr("status_code", code);
+        }
+        pyerr
+    })
 }
 
 fn optional_object_to_map(

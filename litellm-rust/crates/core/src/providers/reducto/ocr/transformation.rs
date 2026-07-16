@@ -252,6 +252,7 @@ fn transform_reducto_response(model: &str, response_json: Value) -> CoreResult<O
             "credits": usage.get("credits").cloned().unwrap_or(Value::Null),
         })),
         object: "ocr".to_string(),
+        ..Default::default()
     })
 }
 

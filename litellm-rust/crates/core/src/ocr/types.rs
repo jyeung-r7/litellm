@@ -7,13 +7,16 @@ pub struct OcrRequestData {
     pub files: Option<Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OcrResponseData {
     pub pages: Vec<Value>,
     pub model: String,
     pub document_annotation: Option<Value>,
     pub usage_info: Option<Value>,
     pub object: String,
+    pub content: Option<Value>,
+    pub tables: Option<Value>,
+    pub key_value_pairs: Option<Value>,
 }
 
 impl OcrResponseData {
@@ -24,6 +27,9 @@ impl OcrResponseData {
             "document_annotation": self.document_annotation,
             "usage_info": self.usage_info,
             "object": self.object,
+            "content": self.content,
+            "tables": self.tables,
+            "keyValuePairs": self.key_value_pairs,
         })
     }
 }

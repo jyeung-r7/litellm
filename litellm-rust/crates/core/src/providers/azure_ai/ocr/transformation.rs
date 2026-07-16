@@ -14,7 +14,7 @@ const AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT_ENV: &str = "AZURE_DOCUMENT_INTELLIGE
 const AZURE_DOCUMENT_INTELLIGENCE_API_VERSION: &str = "2024-11-30";
 const AZURE_DOCUMENT_INTELLIGENCE_DEFAULT_DPI: i64 = 96;
 
-const AZURE_DOCUMENT_INTELLIGENCE_SUPPORTED_OCR_PARAMS: &[&str] = &["pages"];
+const AZURE_DOCUMENT_INTELLIGENCE_SUPPORTED_OCR_PARAMS: &[&str] = &["pages", "features"];
 
 pub struct AzureAiOcrConfig;
 pub struct AzureDocumentIntelligenceOcrConfig;
@@ -192,6 +192,47 @@ fn normalize_pages_param(pages: &Value) -> CoreResult<Option<String>> {
     }
 }
 
+fn feature_token_is_valid(token: &str) -> bool {
+    let mut chars = token.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() => chars.all(|ch| ch.is_ascii_alphanumeric()),
+        _ => false,
+    }
+}
+
+fn normalize_features_param(features: &Value) -> CoreResult<Option<String>> {
+    let invalid = || {
+        CoreError::InvalidRequest(format!(
+            "Invalid `features` for Azure Document Intelligence: {features}. Expected a list of feature names or a comma-separated string like 'keyValuePairs' or 'keyValuePairs,languages'."
+        ))
+    };
+    let tokens: Vec<String> = match features {
+        Value::String(value) => value
+            .split(',')
+            .map(|token| token.trim().to_string())
+            .collect(),
+        Value::Array(values) => {
+            if values.is_empty() {
+                return Ok(None);
+            }
+            if !values.iter().all(Value::is_string) {
+                return Err(invalid());
+            }
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|token| token.trim().to_string())
+                .collect()
+        }
+        _ => return Err(invalid()),
+    };
+    if tokens.iter().all(|token| feature_token_is_valid(token)) {
+        Ok(Some(tokens.join(",")))
+    } else {
+        Err(invalid())
+    }
+}
+
 pub fn complete_document_intelligence_url(
     api_base: Option<&str>,
     model: &str,
@@ -209,6 +250,13 @@ pub fn complete_document_intelligence_url(
     if let Some(pages) = optional_params.get("pages") {
         if let Some(normalized) = normalize_pages_param(pages)? {
             url.push_str("&pages=");
+            url.push_str(&normalized);
+        }
+    }
+
+    if let Some(features) = optional_params.get("features") {
+        if let Some(normalized) = normalize_features_param(features)? {
+            url.push_str("&features=");
             url.push_str(&normalized);
         }
     }
@@ -376,8 +424,8 @@ impl OcrProviderConfig for AzureDocumentIntelligenceOcrConfig {
             )));
         }
 
-        let azure_pages = response
-            .get("analyzeResult")
+        let analyze_result = response.get("analyzeResult");
+        let azure_pages = analyze_result
             .and_then(|result| result.get("pages"))
             .and_then(Value::as_array)
             .cloned()
@@ -405,6 +453,15 @@ impl OcrProviderConfig for AzureDocumentIntelligenceOcrConfig {
             model: model.to_string(),
             document_annotation: None,
             object: "ocr".to_string(),
+            content: analyze_result
+                .and_then(|result| result.get("content"))
+                .cloned(),
+            tables: analyze_result
+                .and_then(|result| result.get("tables"))
+                .cloned(),
+            key_value_pairs: analyze_result
+                .and_then(|result| result.get("keyValuePairs"))
+                .cloned(),
         })
     }
 
@@ -490,6 +547,92 @@ mod tests {
     }
 
     #[test]
+    fn document_intelligence_url_normalizes_single_zero_based_page() {
+        let params = serde_json::Map::from_iter([("pages".to_string(), json!([0]))]);
+        let url = complete_document_intelligence_url(
+            Some("https://example.cognitiveservices.azure.com"),
+            "azure_ai/doc-intelligence/prebuilt-read",
+            &params,
+            &|_| None,
+        )
+        .expect("url builds");
+
+        assert!(url.ends_with("&pages=1"), "{url}");
+    }
+
+    #[test]
+    fn document_intelligence_url_rejects_negative_pages() {
+        let params = serde_json::Map::from_iter([("pages".to_string(), json!([0, -1]))]);
+        let error = complete_document_intelligence_url(
+            Some("https://example.cognitiveservices.azure.com"),
+            "prebuilt-read",
+            &params,
+            &|_| None,
+        )
+        .expect_err("negative page rejected");
+
+        assert!(matches!(error, CoreError::InvalidRequest(message) if message.contains(">= 0")));
+    }
+
+    #[test]
+    fn document_intelligence_url_rejects_malformed_pages() {
+        let params = serde_json::Map::from_iter([("pages".to_string(), json!("1-,foo"))]);
+        let error = complete_document_intelligence_url(
+            Some("https://example.cognitiveservices.azure.com"),
+            "prebuilt-read",
+            &params,
+            &|_| None,
+        )
+        .expect_err("malformed page string rejected");
+
+        assert!(matches!(error, CoreError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn document_intelligence_url_appends_features() {
+        let params = serde_json::Map::from_iter([
+            ("pages".to_string(), json!([0])),
+            (
+                "features".to_string(),
+                json!(["keyValuePairs", "languages"]),
+            ),
+        ]);
+        let url = complete_document_intelligence_url(
+            Some("https://example.cognitiveservices.azure.com"),
+            "prebuilt-layout",
+            &params,
+            &|_| None,
+        )
+        .expect("url builds");
+
+        assert!(
+            url.ends_with("&pages=1&features=keyValuePairs,languages"),
+            "{url}"
+        );
+    }
+
+    #[test]
+    fn document_intelligence_url_rejects_malformed_features() {
+        let params = serde_json::Map::from_iter([("features".to_string(), json!(["bad name!"]))]);
+        let error = complete_document_intelligence_url(
+            Some("https://example.cognitiveservices.azure.com"),
+            "prebuilt-layout",
+            &params,
+            &|_| None,
+        )
+        .expect_err("malformed feature rejected");
+
+        assert!(matches!(error, CoreError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn document_intelligence_features_are_supported_param() {
+        assert!(AZURE_DOCUMENT_INTELLIGENCE_OCR_CONFIG
+            .supported_ocr_params()
+            .contains(&"features"));
+    }
+
+    #[test]
     fn document_intelligence_response_normalizes_pages() {
         let response = AZURE_DOCUMENT_INTELLIGENCE_OCR_CONFIG
             .transform_ocr_response(
@@ -516,5 +659,62 @@ mod tests {
             response.usage_info,
             Some(json!({"pages_processed": 1, "doc_size_bytes": null}))
         );
+    }
+
+    #[test]
+    fn document_intelligence_response_preserves_content_tables_and_key_value_pairs() {
+        let response = AZURE_DOCUMENT_INTELLIGENCE_OCR_CONFIG
+            .transform_ocr_response(
+                "prebuilt-layout",
+                json!({
+                    "status": "succeeded",
+                    "analyzeResult": {
+                        "content": "full document text",
+                        "pages": [{"pageNumber": 1, "lines": [{"content": "hi"}]}],
+                        "tables": [{"rowCount": 2, "columnCount": 3}],
+                        "keyValuePairs": [{"key": {"content": "Name"}, "value": {"content": "Ada"}}]
+                    }
+                }),
+            )
+            .expect("response transforms");
+
+        assert_eq!(response.content, Some(json!("full document text")));
+        assert_eq!(
+            response.tables,
+            Some(json!([{"rowCount": 2, "columnCount": 3}]))
+        );
+        assert_eq!(
+            response.key_value_pairs,
+            Some(json!([{"key": {"content": "Name"}, "value": {"content": "Ada"}}]))
+        );
+
+        let serialized = response.into_json();
+        assert_eq!(serialized["content"], "full document text");
+        assert_eq!(serialized["tables"][0]["rowCount"], 2);
+        assert_eq!(serialized["keyValuePairs"][0]["value"]["content"], "Ada");
+    }
+
+    #[test]
+    fn document_intelligence_response_omits_absent_azure_fields_as_null() {
+        let response = AZURE_DOCUMENT_INTELLIGENCE_OCR_CONFIG
+            .transform_ocr_response(
+                "prebuilt-read",
+                json!({
+                    "status": "succeeded",
+                    "analyzeResult": {
+                        "pages": [{"pageNumber": 1, "lines": [{"content": "hi"}]}]
+                    }
+                }),
+            )
+            .expect("response transforms");
+
+        assert_eq!(response.content, None);
+        assert_eq!(response.tables, None);
+        assert_eq!(response.key_value_pairs, None);
+
+        let serialized = response.into_json();
+        assert!(serialized["content"].is_null());
+        assert!(serialized["tables"].is_null());
+        assert!(serialized["keyValuePairs"].is_null());
     }
 }

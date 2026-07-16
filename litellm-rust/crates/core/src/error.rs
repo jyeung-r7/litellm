@@ -23,6 +23,8 @@ pub enum CoreError {
     Http { status: u16, body: String },
     #[error("OCR network error: {0}")]
     Network(String),
+    #[error("OCR request timed out: {0}")]
+    Timeout(String),
     #[error("routing error: {0}")]
     Routing(String),
 }

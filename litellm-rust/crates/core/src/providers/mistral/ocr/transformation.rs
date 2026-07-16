@@ -131,6 +131,7 @@ impl OcrProviderConfig for MistralOcrConfig {
             document_annotation,
             usage_info,
             object: "ocr".to_string(),
+            ..Default::default()
         })
     }
 
