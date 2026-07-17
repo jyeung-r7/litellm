@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 import pytest
 import yaml
+from pydantic import BaseModel, Field
 
 TEST_PDF_URL = (
     "https://cdn.jsdelivr.net/gh/BerriAI/litellm"
@@ -64,24 +65,35 @@ RUST_OCR_GATEWAY_CASES = [
 CONFIG_PATH = Path(__file__).with_name("litellm-config.yml")
 
 
+class ModelInfoDetail(BaseModel):
+    id: str | None = None
+
+
+class ModelInfoEntry(BaseModel):
+    model_name: str | None = None
+    model_info: ModelInfoDetail = Field(default_factory=ModelInfoDetail)
+
+
+class ModelInfoResponse(BaseModel):
+    data: list[ModelInfoEntry] = Field(default_factory=list)
+
+
+def _parse_model_info(response: httpx.Response) -> ModelInfoResponse:
+    assert response.status_code == 200, response.text
+    return ModelInfoResponse.model_validate(response.json())
+
+
 @dataclass(frozen=True)
 class OcrGateway:
     base_url: str
     master_key: str
 
     def model_names(self) -> set[str]:
-        with httpx.Client(
-            timeout=float(os.getenv("E2E_REQUEST_TIMEOUT", "120"))
-        ) as client:
-            response = client.get(
-                f"{self.base_url.rstrip('/')}/model/info",
-                headers={"Authorization": f"Bearer {self.master_key}"},
-            )
-        assert response.status_code == 200, response.text
+        with self._client() as client:
+            response = client.get(f"{self.base_url.rstrip('/')}/model/info")
+        parsed = _parse_model_info(response)
         return {
-            model["model_name"]
-            for model in response.json().get("data", [])
-            if "model_name" in model
+            entry.model_name for entry in parsed.data if entry.model_name is not None
         }
 
     def ocr(self, model: str, document: dict[str, str]) -> httpx.Response:
@@ -119,10 +131,10 @@ class OcrGateway:
     def model_id(self, model_name: str) -> str | None:
         with self._client() as client:
             response = client.get(f"{self.base_url.rstrip('/')}/model/info")
-        assert response.status_code == 200, response.text
-        for model in response.json().get("data", []):
-            if model.get("model_name") == model_name:
-                return model.get("model_info", {}).get("id")
+        parsed = _parse_model_info(response)
+        for entry in parsed.data:
+            if entry.model_name == model_name:
+                return entry.model_info.id
         return None
 
     def wait_for_model(self, model_name: str, attempts: int = 20) -> None:
@@ -229,9 +241,8 @@ class TestRustOcrDynamicDeployment:
             _assert_ocr_response_shape(response.json())
             assert "os.environ/MISTRAL_API_KEY" not in response.text
         finally:
-            model_id = gateway.model_id(model_name)
-            assert model_id is not None
-            delete = gateway.delete_model(model_id)
-            assert delete.status_code == 200, delete.text
-
-        gateway.wait_for_model_absent(model_name)
+            deployed_id = gateway.model_id(model_name)
+            if deployed_id is not None:
+                delete = gateway.delete_model(deployed_id)
+                assert delete.status_code == 200, delete.text
+                gateway.wait_for_model_absent(model_name)
