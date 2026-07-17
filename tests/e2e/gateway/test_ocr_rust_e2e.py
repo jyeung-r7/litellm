@@ -19,10 +19,16 @@ import httpx
 import pypdf
 import pytest
 import yaml
+from pypdf.generic import (
+    ArrayObject,
+    DecodedStreamObject,
+    DictionaryObject,
+    NameObject,
+    NumberObject,
+)
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-ONE_PAGE_FIXTURE = REPO_ROOT / "tests" / "llm_translation" / "fixtures" / "dummy.pdf"
 AZURE_DI_MODEL = "rust-ocr-azure-document-intelligence"
+INVOICE_NUMBER = "INV-123"
 
 TEST_PDF_URL = (
     "https://cdn.jsdelivr.net/gh/BerriAI/litellm"
@@ -140,12 +146,83 @@ def _assert_ocr_response_shape(response_json: dict[str, Any]) -> None:
     assert "markdown" in response_json["pages"][0]
 
 
+def _invoice_page_content_stream() -> bytes:
+    header_pairs = (
+        (f"Invoice Number: {INVOICE_NUMBER}", 690),
+        ("Invoice Date: 2026-01-15", 672),
+        ("Bill To: Globex LLC", 654),
+        ("Total Due: $1,250.00", 636),
+    )
+    table_rows_y = (560.0, 530.0, 500.0, 470.0, 440.0)
+    table_cols_x = (72.0, 300.0, 420.0, 540.0)
+    table_cells = (
+        ("Description", 80, 566),
+        ("Qty", 306, 566),
+        ("Unit Price", 426, 566),
+        ("Widget A", 80, 536),
+        ("2", 306, 536),
+        ("$100.00", 426, 536),
+        ("Widget B", 80, 506),
+        ("5", 306, 506),
+        ("$150.00", 426, 506),
+        ("Service Fee", 80, 476),
+        ("1", 306, 476),
+        ("$50.00", 426, 476),
+    )
+
+    title = (
+        "BT",
+        "/F1 18 Tf",
+        "1 0 0 1 72 720 Tm",
+        "(ACME Corporation Invoice) Tj",
+        "ET",
+    )
+    headers = tuple(
+        op
+        for text, y in header_pairs
+        for op in ("BT", "/F1 12 Tf", f"1 0 0 1 72 {y} Tm", f"({text}) Tj", "ET")
+    )
+    grid = (
+        "0.5 w",
+        *(f"72 {y} m 540 {y} l S" for y in table_rows_y),
+        *(f"{x} {table_rows_y[0]} m {x} {table_rows_y[-1]} l S" for x in table_cols_x),
+    )
+    cells = tuple(
+        op
+        for text, x, y in table_cells
+        for op in ("BT", "/F1 10 Tf", f"1 0 0 1 {x} {y} Tm", f"({text}) Tj", "ET")
+    )
+    return "\n".join((*title, *headers, *grid, *cells)).encode("latin-1")
+
+
+def _add_invoice_page(writer: pypdf.PdfWriter) -> None:
+    page = writer.add_blank_page(width=612, height=792)
+    stream = DecodedStreamObject()
+    stream.set_data(_invoice_page_content_stream())
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {
+            NameObject("/Font"): DictionaryObject(
+                {NameObject("/F1"): writer._add_object(font)}
+            )
+        }
+    )
+    page[NameObject("/MediaBox")] = ArrayObject(
+        [NumberObject(0), NumberObject(0), NumberObject(612), NumberObject(792)]
+    )
+
+
 def _three_page_pdf_data_uri() -> str:
-    assert ONE_PAGE_FIXTURE.exists(), f"missing one-page fixture at {ONE_PAGE_FIXTURE}"
-    reader = pypdf.PdfReader(str(ONE_PAGE_FIXTURE))
     writer = pypdf.PdfWriter()
     for _ in range(3):
-        writer.add_page(reader.pages[0])
+        _add_invoice_page(writer)
     buffer = io.BytesIO()
     writer.write(buffer)
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -205,8 +282,12 @@ class TestAzureDocumentIntelligencePagesParity:
         _assert_ocr_response_shape(body)
         assert len(body["pages"]) == 3
         assert isinstance(body["content"], str) and body["content"]
-        assert isinstance(body["tables"], list)
-        assert isinstance(body["keyValuePairs"], list)
+        assert isinstance(body["tables"], list) and body["tables"]
+        assert isinstance(body["keyValuePairs"], list) and body["keyValuePairs"]
+        assert any(
+            INVOICE_NUMBER in ((pair.get("value") or {}).get("content") or "")
+            for pair in body["keyValuePairs"]
+        )
 
 
 class TestRustOcrGateway:
