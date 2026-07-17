@@ -23,9 +23,11 @@ use litellm_core::providers::vertex_ai::ocr::transformation::{
 
 use super::http_client;
 
+use crate::constants::{
+    AZURE_OPERATION_POLLING_TIMEOUT_ENV, DEFAULT_AZURE_OPERATION_POLLING_TIMEOUT_SECS,
+};
+
 const ERROR_BODY_MAX_CHARS: usize = 256;
-const DEFAULT_AZURE_OPERATION_POLLING_TIMEOUT_SECS: u64 = 120;
-const AZURE_OPERATION_POLLING_TIMEOUT_ENV: &str = "AZURE_OPERATION_POLLING_TIMEOUT";
 const DEFAULT_MAX_IMAGE_URL_DOWNLOAD_SIZE_MB: f64 = 50.0;
 const MAX_SAFE_FETCH_REDIRECTS: usize = 10;
 
@@ -483,19 +485,12 @@ fn operation_status(response_json: &Value) -> CoreResult<&str> {
     match status {
         "succeeded" => Ok("succeeded"),
         "running" | "notStarted" => Ok("running"),
-        "failed" => {
-            let message = response_json
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("Unknown error");
-            Err(CoreError::InvalidResponse(format!(
-                "Azure Document Intelligence analysis failed: {message}"
-            )))
-        }
-        other => Err(CoreError::InvalidResponse(format!(
-            "Unknown operation status: {other}"
-        ))),
+        "failed" => Err(CoreError::InvalidResponse(
+            "Azure Document Intelligence analysis failed".to_string(),
+        )),
+        _ => Err(CoreError::InvalidResponse(
+            "Azure Document Intelligence returned an unexpected operation status".to_string(),
+        )),
     }
 }
 

@@ -138,9 +138,10 @@ fn normalize_pages_param(pages: &Value) -> CoreResult<Option<String>> {
             if normalized.split(',').all(pages_token_is_valid) {
                 Ok(Some(normalized))
             } else {
-                Err(CoreError::InvalidRequest(format!(
-                    "Invalid `pages` string for Azure Document Intelligence: {value:?}. Expected format like '1-3,5,7-9'."
-                )))
+                Err(CoreError::InvalidRequest(
+                    "Invalid `pages` string for Azure Document Intelligence. Expected format like '1-3,5,7-9'."
+                        .to_string(),
+                ))
             }
         }
         Value::Array(values) => {
@@ -176,9 +177,10 @@ fn normalize_pages_param(pages: &Value) -> CoreResult<Option<String>> {
                 if normalized.split(',').all(pages_token_is_valid) {
                     return Ok(Some(normalized));
                 }
-                return Err(CoreError::InvalidRequest(format!(
-                    "Invalid `pages` list for Azure Document Intelligence: {values:?}. Expected tokens like '1' or '3-5'."
-                )));
+                return Err(CoreError::InvalidRequest(
+                    "Invalid `pages` list for Azure Document Intelligence. Expected tokens like '1' or '3-5'."
+                        .to_string(),
+                ));
             }
             Err(CoreError::InvalidRequest(
                 "`pages` must be a list[int] (0-based, Mistral-style) or a string like '1-3,5,7-9'."
@@ -193,18 +195,19 @@ fn normalize_pages_param(pages: &Value) -> CoreResult<Option<String>> {
 }
 
 fn feature_token_is_valid(token: &str) -> bool {
-    let mut chars = token.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() => chars.all(|ch| ch.is_ascii_alphanumeric()),
-        _ => false,
-    }
+    token
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && token.chars().all(|ch| ch.is_ascii_alphanumeric())
 }
 
 fn normalize_features_param(features: &Value) -> CoreResult<Option<String>> {
     let invalid = || {
-        CoreError::InvalidRequest(format!(
-            "Invalid `features` for Azure Document Intelligence: {features}. Expected a list of feature names or a comma-separated string like 'keyValuePairs' or 'keyValuePairs,languages'."
-        ))
+        CoreError::InvalidRequest(
+            "Invalid `features` for Azure Document Intelligence. Expected a list of feature names or a comma-separated string like 'keyValuePairs' or 'keyValuePairs,languages'."
+                .to_string(),
+        )
     };
     let tokens: Vec<String> = match features {
         Value::String(value) => value
@@ -328,6 +331,34 @@ fn page_dimensions(page: &Map<String, Value>) -> Value {
     })
 }
 
+fn optional_string_field(
+    analyze_result: Option<&Value>,
+    field: &'static str,
+) -> CoreResult<Option<String>> {
+    match analyze_result.and_then(|result| result.get(field)) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(other) => Err(CoreError::InvalidType {
+            expected: "string",
+            actual: json_type_name(other),
+        }),
+    }
+}
+
+fn optional_array_field(
+    analyze_result: Option<&Value>,
+    field: &'static str,
+) -> CoreResult<Option<Vec<Value>>> {
+    match analyze_result.and_then(|result| result.get(field)) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(values)) => Ok(Some(values.clone())),
+        Some(other) => Err(CoreError::InvalidType {
+            expected: "array",
+            actual: json_type_name(other),
+        }),
+    }
+}
+
 impl OcrProviderConfig for AzureAiOcrConfig {
     fn supported_ocr_params(&self) -> &'static [&'static str] {
         MISTRAL_OCR_CONFIG.supported_ocr_params()
@@ -419,9 +450,9 @@ impl OcrProviderConfig for AzureDocumentIntelligenceOcrConfig {
             .and_then(Value::as_str)
             .ok_or(CoreError::MissingField("status"))?;
         if status != "succeeded" {
-            return Err(CoreError::InvalidResponse(format!(
-                "Azure Document Intelligence analysis failed with status: {status}"
-            )));
+            return Err(CoreError::InvalidResponse(
+                "Azure Document Intelligence analysis did not succeed".to_string(),
+            ));
         }
 
         let analyze_result = response.get("analyzeResult");
@@ -453,15 +484,9 @@ impl OcrProviderConfig for AzureDocumentIntelligenceOcrConfig {
             model: model.to_string(),
             document_annotation: None,
             object: "ocr".to_string(),
-            content: analyze_result
-                .and_then(|result| result.get("content"))
-                .cloned(),
-            tables: analyze_result
-                .and_then(|result| result.get("tables"))
-                .cloned(),
-            key_value_pairs: analyze_result
-                .and_then(|result| result.get("keyValuePairs"))
-                .cloned(),
+            content: optional_string_field(analyze_result, "content")?,
+            tables: optional_array_field(analyze_result, "tables")?,
+            key_value_pairs: optional_array_field(analyze_result, "keyValuePairs")?,
         })
     }
 
@@ -678,14 +703,16 @@ mod tests {
             )
             .expect("response transforms");
 
-        assert_eq!(response.content, Some(json!("full document text")));
+        assert_eq!(response.content, Some("full document text".to_string()));
         assert_eq!(
             response.tables,
-            Some(json!([{"rowCount": 2, "columnCount": 3}]))
+            Some(vec![json!({"rowCount": 2, "columnCount": 3})])
         );
         assert_eq!(
             response.key_value_pairs,
-            Some(json!([{"key": {"content": "Name"}, "value": {"content": "Ada"}}]))
+            Some(vec![
+                json!({"key": {"content": "Name"}, "value": {"content": "Ada"}})
+            ])
         );
 
         let serialized = response.into_json();
@@ -717,5 +744,62 @@ mod tests {
         assert!(!object.contains_key("content"));
         assert!(!object.contains_key("tables"));
         assert!(!object.contains_key("keyValuePairs"));
+    }
+
+    #[test]
+    fn document_intelligence_response_rejects_wrong_typed_extras() {
+        let content_error = AZURE_DOCUMENT_INTELLIGENCE_OCR_CONFIG
+            .transform_ocr_response(
+                "prebuilt-layout",
+                json!({
+                    "status": "succeeded",
+                    "analyzeResult": {"content": 42, "pages": []}
+                }),
+            )
+            .expect_err("non-string content rejected");
+        assert!(matches!(
+            content_error,
+            CoreError::InvalidType {
+                expected: "string",
+                ..
+            }
+        ));
+
+        let tables_error = AZURE_DOCUMENT_INTELLIGENCE_OCR_CONFIG
+            .transform_ocr_response(
+                "prebuilt-layout",
+                json!({
+                    "status": "succeeded",
+                    "analyzeResult": {"tables": {"rowCount": 2}, "pages": []}
+                }),
+            )
+            .expect_err("non-array tables rejected");
+        assert!(matches!(
+            tables_error,
+            CoreError::InvalidType {
+                expected: "array",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn document_intelligence_invalid_features_error_omits_caller_input() {
+        let params = serde_json::Map::from_iter([(
+            "features".to_string(),
+            json!(["sensitiveCallerToken!"]),
+        )]);
+        let error = complete_document_intelligence_url(
+            Some("https://example.cognitiveservices.azure.com"),
+            "prebuilt-layout",
+            &params,
+            &|_| None,
+        )
+        .expect_err("malformed feature rejected");
+
+        let CoreError::InvalidRequest(message) = error else {
+            panic!("expected InvalidRequest");
+        };
+        assert!(!message.contains("sensitiveCallerToken"), "{message}");
     }
 }

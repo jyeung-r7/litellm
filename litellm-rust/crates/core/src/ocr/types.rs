@@ -14,9 +14,9 @@ pub struct OcrResponseData {
     pub document_annotation: Option<Value>,
     pub usage_info: Option<Value>,
     pub object: String,
-    pub content: Option<Value>,
-    pub tables: Option<Value>,
-    pub key_value_pairs: Option<Value>,
+    pub content: Option<String>,
+    pub tables: Option<Vec<Value>>,
+    pub key_value_pairs: Option<Vec<Value>>,
 }
 
 impl OcrResponseData {
@@ -35,9 +35,9 @@ impl OcrResponseData {
             ("object".to_string(), Value::String(self.object)),
         ];
         let extras = [
-            ("content", self.content),
-            ("tables", self.tables),
-            ("keyValuePairs", self.key_value_pairs),
+            ("content", self.content.map(Value::String)),
+            ("tables", self.tables.map(Value::Array)),
+            ("keyValuePairs", self.key_value_pairs.map(Value::Array)),
         ]
         .into_iter()
         .filter_map(|(key, value)| value.map(|value| (key.to_string(), value)));
@@ -80,9 +80,9 @@ mod tests {
             document_annotation: None,
             usage_info: None,
             object: "ocr".to_string(),
-            content: Some(json!("full text")),
-            tables: Some(json!([{"rowCount": 1}])),
-            key_value_pairs: Some(json!([{"key": {"content": "k"}}])),
+            content: Some("full text".to_string()),
+            tables: Some(vec![json!({"rowCount": 1})]),
+            key_value_pairs: Some(vec![json!({"key": {"content": "k"}})]),
         };
 
         let value = response.into_json();

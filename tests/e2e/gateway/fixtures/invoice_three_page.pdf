@@ -1,0 +1,134 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Contents 7 0 R >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Contents 7 0 R >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Contents 7 0 R >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+7 0 obj
+<< /Length 1110 >>
+stream
+BT
+/F1 18 Tf
+1 0 0 1 72 720 Tm
+(Sample Invoice) Tj
+ET
+BT
+/F1 12 Tf
+1 0 0 1 72 690 Tm
+(Invoice Number: INV-123) Tj
+ET
+BT
+/F1 12 Tf
+1 0 0 1 72 672 Tm
+(Invoice Date: 2026-01-15) Tj
+ET
+BT
+/F1 12 Tf
+1 0 0 1 72 654 Tm
+(Bill To: Test Buyer) Tj
+ET
+BT
+/F1 12 Tf
+1 0 0 1 72 636 Tm
+(Total Due: $1,250.00) Tj
+ET
+0.5 w
+72 560.0 m 540 560.0 l S
+72 530.0 m 540 530.0 l S
+72 500.0 m 540 500.0 l S
+72 470.0 m 540 470.0 l S
+72 440.0 m 540 440.0 l S
+72.0 560.0 m 72.0 440.0 l S
+300.0 560.0 m 300.0 440.0 l S
+420.0 560.0 m 420.0 440.0 l S
+540.0 560.0 m 540.0 440.0 l S
+BT
+/F1 10 Tf
+1 0 0 1 80 566 Tm
+(Description) Tj
+ET
+BT
+/F1 10 Tf
+1 0 0 1 306 566 Tm
+(Qty) Tj
+ET
+BT
+/F1 10 Tf
+1 0 0 1 426 566 Tm
+(Unit Price) Tj
+ET
+BT
+/F1 10 Tf
+1 0 0 1 80 536 Tm
+(Widget A) Tj
+ET
+BT
+/F1 10 Tf
+1 0 0 1 306 536 Tm
+(2) Tj
+ET
+BT
+/F1 10 Tf
+1 0 0 1 426 536 Tm
+($100.00) Tj
+ET
+BT
+/F1 10 Tf
+1 0 0 1 80 506 Tm
+(Widget B) Tj
+ET
+BT
+/F1 10 Tf
+1 0 0 1 306 506 Tm
+(5) Tj
+ET
+BT
+/F1 10 Tf
+1 0 0 1 426 506 Tm
+($150.00) Tj
+ET
+BT
+/F1 10 Tf
+1 0 0 1 80 476 Tm
+(Service Fee) Tj
+ET
+BT
+/F1 10 Tf
+1 0 0 1 306 476 Tm
+(1) Tj
+ET
+BT
+/F1 10 Tf
+1 0 0 1 426 476 Tm
+($50.00) Tj
+ET
+endstream
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000127 00000 n 
+0000000253 00000 n 
+0000000379 00000 n 
+0000000505 00000 n 
+0000000575 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+1737
+%%EOF
